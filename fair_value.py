@@ -1,105 +1,131 @@
-"""Fair value engine — pulls sharp odds from The Odds API and devigs."""
+"""All tunable constants in one place. Every value is env-overridable.
+
+Money values are CENTS unless the name says otherwise.
+Change a value here (or set the env var on Railway) — nothing else to edit.
+"""
 import logging
 import os
-import time
-
-import requests
-
-log = logging.getLogger("fair")
-
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
-SPORT = os.environ.get("ODDS_SPORT", "baseball_mlb")
-# Prefer sharp books; fall back to consensus of whatever is available
-SHARP_BOOKS = ["pinnacle", "circasports", "betonlineag"]
-# NOTE: The Odds API charges (markets x regions) credits per call.
-# us,eu = 2 credits/call. Monthly usage ~= 2 * 86400/CACHE_SECS * 30.
-#   CACHE_SECS=90  -> ~57K/mo  (needs 100K tier, ~$59/mo)  <- recommended
-#   CACHE_SECS=300 -> ~17K/mo  (fits 20K tier, ~$30/mo, slower reactions)
-REGIONS = os.environ.get("ODDS_REGIONS", "us,eu")
-
-_cache = {"ts": 0, "games": []}
-CACHE_SECS = int(os.environ.get("ODDS_CACHE_SECS", "90"))
 
 
-def american_to_prob(odds: float) -> float:
-    if odds < 0:
-        return -odds / (-odds + 100)
-    return 100 / (odds + 100)
+def _i(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
 
 
-def devig_two_way(p_a: float, p_b: float):
-    total = p_a + p_b
-    if total <= 0:
-        return None, None
-    return p_a / total, p_b / total
+def _f(name: str, default: float) -> float:
+    return float(os.environ.get(name, str(default)))
 
 
-def fetch_games():
-    """Return list of {home, away, commence, home_prob, away_prob, books_used}."""
-    now = time.time()
-    if now - _cache["ts"] < CACHE_SECS and _cache["games"]:
-        return _cache["games"]
-
-    if not ODDS_API_KEY:
-        log.error("ODDS_API_KEY missing")
-        return []
-
-    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": REGIONS,
-        "markets": "h2h",
-        "oddsFormat": "american",
-    }
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            log.warning(f"odds api {r.status_code}: {r.text[:200]}")
-            return _cache["games"]  # stale ok briefly; staleness gate is in main
-        data = r.json()
-    except requests.RequestException as e:
-        log.warning(f"odds api network error: {e}")
-        return _cache["games"]
-
-    games = []
-    for g in data:
-        home, away = g.get("home_team"), g.get("away_team")
-        commence = g.get("commence_time")
-        # Collect devigged probs per book, prefer sharps
-        sharp_probs, all_probs = [], []
-        for bk in g.get("bookmakers", []):
-            key = bk.get("key", "")
-            for mkt in bk.get("markets", []):
-                if mkt.get("key") != "h2h":
-                    continue
-                ph = pa = None
-                for oc in mkt.get("outcomes", []):
-                    if oc.get("name") == home:
-                        ph = american_to_prob(oc.get("price", 0))
-                    elif oc.get("name") == away:
-                        pa = american_to_prob(oc.get("price", 0))
-                if ph and pa:
-                    dh, da = devig_two_way(ph, pa)
-                    if dh:
-                        all_probs.append((dh, da))
-                        if key in SHARP_BOOKS:
-                            sharp_probs.append((dh, da))
-        probs = sharp_probs or all_probs
-        if not probs:
-            continue
-        home_prob = sum(p[0] for p in probs) / len(probs)
-        away_prob = sum(p[1] for p in probs) / len(probs)
-        games.append({
-            "home": home, "away": away, "commence": commence,
-            "home_prob": home_prob, "away_prob": away_prob,
-            "n_books": len(probs), "sharp": bool(sharp_probs),
-        })
-
-    _cache["ts"] = now
-    _cache["games"] = games
-    log.info(f"fair values refreshed: {len(games)} games")
-    return games
+def _s(name: str, default: str) -> str:
+    return os.environ.get(name, default)
 
 
-def cache_age() -> float:
-    return time.time() - _cache["ts"]
+# ── identity / endpoints ───────────────────────────────────────────────
+KALSHI_BASE_URL   = _s("KALSHI_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2")
+KALSHI_SERIES     = _s("KALSHI_SERIES", "KXMLBGAME")
+DISCORD_WEBHOOK   = _s("DISCORD_WEBHOOK", "")
+
+# ── risk caps ──────────────────────────────────────────────────────────
+PER_MARKET_CAP    = _i("PER_MARKET_CAP", 2000)     # $20 max cost basis per market
+TOTAL_CAP         = _i("TOTAL_CAP", 40000)         # $400 max total working capital
+DAILY_LOSS_LIMIT  = _i("DAILY_LOSS_LIMIT", 6000)   # $60 realized loss -> halt for the day
+DRAWDOWN_LIMIT    = _i("DRAWDOWN_LIMIT", 20000)    # $200 equity drawdown -> hard kill
+START_BANKROLL    = _i("START_BANKROLL", 50000)    # $500; set to actual deposit
+
+# ── quoting: edge & spread ─────────────────────────────────────────────
+MIN_EDGE_CENTS    = _i("MIN_EDGE_CENTS", 3)   # required edge after fees, normal side
+OFFSET_MIN_EDGE   = _i("OFFSET_MIN_EDGE", 1)  # relaxed edge floor on the side that FLATTENS inventory
+MARGIN_CENTS      = _i("MARGIN_CENTS", 4)     # never post closer than this to fair
+REQUOTE_MOVE      = _i("REQUOTE_MOVE", 2)     # cancel/re-quote if fair moved this many cents
+
+# ── quoting: sizing ────────────────────────────────────────────────────
+NO_SIZE_PCT       = _i("NO_SIZE_PCT", 60)     # % of per-market cap to the NO side
+                                              # (retail overbets YES; surplus is on NO)
+
+# ── timing windows (minutes to first pitch) ────────────────────────────
+MAX_HOURS_OUT     = _i("MAX_HOURS_OUT", 48)   # don't quote games further out than this
+WIDEN_MIN         = _i("WIDEN_MIN", 60)       # inside 60m: widen quotes (pre-game vol)
+TIME_WIDEN_CENTS  = _i("TIME_WIDEN_CENTS", 2) # extra margin applied inside WIDEN_MIN
+PULL_MIN          = _i("PULL_MIN", 30)        # inside 30m: pull all quotes entirely
+                                              # (replaces old CUTOFF_MIN)
+
+# ── uncertainty filter (book disagreement, prob points 0-1) ────────────
+# stddev of devigged home-prob across books used for consensus
+UNC_WIDEN         = _f("UNC_WIDEN", 0.015)    # >1.5c disagreement: widen quotes
+UNC_WIDEN_CENTS   = _i("UNC_WIDEN_CENTS", 2)  # extra margin when widening
+UNC_SKIP          = _f("UNC_SKIP", 0.030)     # >3c disagreement: skip market entirely
+MIN_BOOKS         = _i("MIN_BOOKS", 2)        # need at least this many books for a fair
+
+# ── inventory skew ─────────────────────────────────────────────────────
+MAX_INV_SKEW_CENTS = _i("MAX_INV_SKEW_CENTS", 3)  # max cents of shading from inventory
+# skew scales linearly with |position cost| / PER_MARKET_CAP up to the max.
+FILL_COOLDOWN_SECS = _i("FILL_COOLDOWN_SECS", 600)  # pause re-quoting a filled side
+
+# ── fees ───────────────────────────────────────────────────────────────
+# Kalshi taker fee = ceil(0.07 * C * P * (1-P)). Most series charge resting
+# (maker) orders nothing; 0.25 multiplier is a conservative default.
+MAKER_FEE_MULT    = _f("MAKER_FEE_MULT", 0.25)
+
+# ── odds api ───────────────────────────────────────────────────────────
+ODDS_API_KEY      = _s("ODDS_API_KEY", "")
+ODDS_SPORT        = _s("ODDS_SPORT", "baseball_mlb")
+ODDS_REGIONS      = _s("ODDS_REGIONS", "us,eu")
+# Credit math: calls cost (markets x regions-groups) = 2 credits with us,eu.
+#   CACHE=90s -> ~57.6K credits/mo   CACHE=60s -> ~86.4K/mo (fits 100K tier
+#   with room for the bet tracker)   CACHE=30s -> ~172K/mo (DOES NOT FIT).
+ODDS_CACHE_SECS   = _i("ODDS_CACHE_SECS", 60)
+STALE_FAIR_SECS   = _i("STALE_FAIR_SECS", 240)  # cancel everything if feed this stale
+QUOTA_ALERT_REMAINING = _i("QUOTA_ALERT_REMAINING", 8000)  # Discord alert below this
+
+# ── kalshi rate limits (basic tier: ~10 read/s, ~5 transactions/s) ─────
+# We pace below the published caps. Verify your tier at
+# https://trading-api.readme.io/reference/tiers if you upgrade.
+READ_RPS          = _f("READ_RPS", 8.0)
+WRITE_RPS         = _f("WRITE_RPS", 4.0)
+
+# ── ops ────────────────────────────────────────────────────────────────
+LOOP_SECS         = _i("LOOP_SECS", 30)
+WATCHDOG_STALL_SECS = _i("WATCHDOG_STALL_SECS", 300)   # alert if loop silent 5 min
+WATCHDOG_REALERT_SECS = _i("WATCHDOG_REALERT_SECS", 900)
+PAPER_MODE        = os.environ.get("KILL", "") == "1"  # KILL=1 -> paper trading
+ORDERBOOK_DEPTH   = _i("ORDERBOOK_DEPTH", 10)
+
+# ── storage ────────────────────────────────────────────────────────────
+DB_PATH = _s("MAKER_DB", "/data/maker.db")
+if not os.path.isdir(os.path.dirname(DB_PATH) or "."):
+    logging.getLogger("config").warning(
+        f"{os.path.dirname(DB_PATH)} not mounted — falling back to ./maker.db "
+        "(state will NOT survive redeploys; mount a Railway volume at /data)")
+    DB_PATH = "./maker.db"
+
+# ── edge research add-ons (v4.1) ───────────────────────────────────────
+# Favorite-longshot bias (Bürgi/Deng/Whelan, 300K+ Kalshi contracts):
+# low-priced contracts win LESS often than price implies (<10c contracts
+# lose >60% of money); high-priced contracts earn small positive returns.
+# So: demand extra edge when our bid would be a longshot price, and let
+# favorite-side bids through at standard edge.
+LONGSHOT_CENTS    = _i("LONGSHOT_CENTS", 25)     # a bid below this is a longshot
+LONGSHOT_EXTRA_EDGE = _i("LONGSHOT_EXTRA_EDGE", 2)  # extra required edge there
+
+# Steam guard: MLB fairs move fastest on lineup posts (~3-5h out) and
+# pitcher scratches (20-30c swings). If OUR fair moved fast recently, the
+# market is repricing — resting quotes are pick-off bait. Pause the market.
+STEAM_WINDOW_SECS = _i("STEAM_WINDOW_SECS", 180)
+STEAM_MOVE_CENTS  = _f("STEAM_MOVE_CENTS", 3.0)  # move within window -> pause
+STEAM_PAUSE_SECS  = _i("STEAM_PAUSE_SECS", 240)
+
+# ── v4.2 fair-value quality ────────────────────────────────────────────
+# Multiplicative devig is known to overstate longshot probabilities on
+# lopsided lines; the power method (solve k: pa^k + pb^k = 1) corrects it.
+# Since Kalshi's longshot side is the trap side, sharper fairs on big
+# favorites matter. Options: "power" | "multiplicative"
+DEVIG_METHOD      = _s("DEVIG_METHOD", "power")
+# Cross-book consensus: median is robust to one stale/outlier book
+# dragging the fair. Options: "median" | "mean"
+CONSENSUS         = _s("CONSENSUS", "median")
+
+# ── v4.3 practitioner fixes ────────────────────────────────────────────
+# REST polling staleness is the documented pick-off vector for Kalshi bots
+# ("you're trading prices already stale when your order lands"). When any
+# matched game is inside FAST_WINDOW_MIN of first pitch, tighten the loop.
+FAST_WINDOW_MIN   = _i("FAST_WINDOW_MIN", 120)
+FAST_LOOP_SECS    = _i("FAST_LOOP_SECS", 12)
