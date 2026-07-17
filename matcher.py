@@ -51,12 +51,44 @@ def game_date(iso_ts: str):
         return None
 
 
+MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+          "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+
+# 2026 ticker format: KXMLBGAME-26JUL191920LADNYY-NYY
+#   26JUL19 = game date, 1920 = start time (ET, optional in older tickers),
+#   LADNYY = away+home codes concatenated, -NYY = the YES team.
+# close_time is now a settlement deadline DAYS after the game — never use
+# it for game-date matching.
+TICKER_RE = re.compile(
+    r"KXMLBGAME-(\d{2})([A-Z]{3})(\d{2})(\d{4})?([A-Z]{4,6})-([A-Z]{2,3})$")
+
+
+def parse_ticker(ticker: str):
+    """-> (date, away_code, home_code, yes_code) or None."""
+    m = TICKER_RE.match(ticker or "")
+    if not m:
+        return None
+    yy, mon, dd, _hhmm, blob, yes = m.groups()
+    if mon not in MONTHS:
+        return None
+    try:
+        d = datetime.date(2000 + int(yy), MONTHS[mon], int(dd))
+    except ValueError:
+        return None
+    # split the AWAYHOME blob: codes are 2-3 chars; try both splits
+    for i in (3, 2):
+        a, h = blob[:i], blob[i:]
+        if (a in ALL_CODES and h in ALL_CODES):
+            return d, norm_code(a), norm_code(h), norm_code(yes)
+    return None
+
+
 def match_markets(kalshi_markets, fair_games):
     """Return list of quote targets:
-    {ticker, side_team, fair_prob, commence, title}
+    {ticker, yes_team, fair_prob, commence, title, ...}
     One Kalshi market = 'will TEAM win' -> YES prob = that team's fair prob.
     """
-    # Index fair games by (date, frozenset of team keys)
+    # Index fair games by (US game date, frozenset of team keys)
     fair_idx = {}
     for g in fair_games:
         hk, ak = team_key(g["home"]), team_key(g["away"])
@@ -66,52 +98,52 @@ def match_markets(kalshi_markets, fair_games):
 
     out = []
     for m in kalshi_markets:
-        title = f"{m.get('title','')} {m.get('subtitle','')} {m.get('yes_sub_title','')}"
         ticker = m.get("ticker", "")
-        close_iso = m.get("close_time") or m.get("expected_expiration_time") or ""
-        d = game_date(close_iso)
-        if not d:
-            continue
-
-        # Find the two teams referenced in the market
-        keys_found = []
-        tl = title.lower()
-        for frag, key in TEAM_KEYS.items():
-            if frag in tl and key not in keys_found:
-                keys_found.append(key)
-        if len(keys_found) < 2:
-            # ticker often encodes teams e.g. KXMLBGAME-25JUL08NYYMIN-NYY
-            tk = re.findall(r"[A-Z]{2,3}", ticker)
+        parsed = parse_ticker(ticker)
+        if parsed:
+            d, away, home, yes_team = parsed
+            pair = frozenset((away, home))
+        else:
+            # legacy fallback: teams from title/ticker scan, date from
+            # ticker if present, else close_time (old format only)
+            title = (f"{m.get('title','')} {m.get('subtitle','')} "
+                     f"{m.get('yes_sub_title','')}").lower()
             keys_found = []
-            for k in tk:
-                if k in ALL_CODES:
-                    nk = norm_code(k)
-                    if nk not in keys_found:
-                        keys_found.append(nk)
-            keys_found = keys_found[:3]
-        if len(keys_found) < 2:
-            continue
+            for frag, key in TEAM_KEYS.items():
+                if frag in title and key not in keys_found:
+                    keys_found.append(key)
+            if len(keys_found) < 2:
+                for k in re.findall(r"[A-Z]{2,3}", ticker):
+                    if k in ALL_CODES and norm_code(k) not in keys_found:
+                        keys_found.append(norm_code(k))
+            if len(keys_found) < 2:
+                continue
+            pair = frozenset(keys_found[:2])
+            dm = re.search(r"-(\d{2})([A-Z]{3})(\d{2})", ticker)
+            if dm and dm.group(2) in MONTHS:
+                d = datetime.date(2000 + int(dm.group(1)),
+                                  MONTHS[dm.group(2)], int(dm.group(3)))
+            else:
+                d = game_date(m.get("close_time") or "")
+            if not d:
+                continue
+            yes_team = None
+            yst = (m.get("yes_sub_title") or "").lower()
+            for frag, key in TEAM_KEYS.items():
+                if frag in yst:
+                    yes_team = key
+                    break
+            if not yes_team:
+                sm = re.search(r"-([A-Z]{2,3})$", ticker)
+                if sm and sm.group(1) in ALL_CODES:
+                    yes_team = norm_code(sm.group(1))
+            if not yes_team:
+                continue
 
-        pair = frozenset(keys_found[:2])
         game = fair_idx.get((d, pair)) or fair_idx.get(
             (d + datetime.timedelta(days=1), pair)) or fair_idx.get(
             (d - datetime.timedelta(days=1), pair))
         if not game:
-            continue
-
-        # Which team does YES refer to? Prefer explicit yes_sub_title, else
-        # the last team code in the ticker (Kalshi convention: -TEAM suffix)
-        yes_team = None
-        yst = (m.get("yes_sub_title") or "").lower()
-        for frag, key in TEAM_KEYS.items():
-            if frag in yst:
-                yes_team = key
-                break
-        if not yes_team:
-            mm = re.search(r"-([A-Z]{2,3})$", ticker)
-            if mm and mm.group(1) in ALL_CODES:
-                yes_team = norm_code(mm.group(1))
-        if not yes_team:
             continue
 
         hk, ak = team_key(game["home"]), team_key(game["away"])

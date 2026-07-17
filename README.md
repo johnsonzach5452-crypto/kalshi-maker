@@ -1,4 +1,4 @@
-# Kalshi Passive Maker — v4.4
+# Kalshi Passive Maker — v4.7
 
 Rests limit orders on Kalshi MLB game markets at devigged sharp consensus
 (Pinnacle/Circa/BetOnline via The Odds API) minus an edge that must clear
@@ -85,3 +85,10 @@ quota + loop cadence in the header, priced-markets table (fair,
 uncertainty, books, time to start, quoting/steam/pulled/unc-skip state),
 cumulative P&L line over the daily bars, edge column on resting quotes,
 % of cap on inventory. Auto-refresh 10s.
+
+## v4.5–v4.7
+- Queue-position step-up at post time (JOIN_BEST/JOIN_MIN_EDGE)
+- Hold-top-of-queue: resting orders requote above rivals while edge holds
+- Dashboard Pause/Resume button (DASH_TOKEN-protected), pause flag in DB
+- Matcher passes uncertainty/n_books through (uncertainty filter now live)
+- Exact maker fee formula; adaptive 12s loop inside 2h of first pitch
