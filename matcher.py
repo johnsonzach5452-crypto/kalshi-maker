@@ -172,3 +172,128 @@ def match_markets(kalshi_markets, fair_games):
             "n_books": game.get("n_books", 0),
         })
     return out
+
+
+# ── WNBA ladder matching (KXWNBASPREAD / KXWNBATOTAL) ─────────────────
+# Ticker anatomy (verified against live markets):
+#   KXWNBASPREAD-26JUL20WSHGS-WSH7   -> WSH wins by over 6.5 (suffix-0.5)
+#   KXWNBATOTAL-26JUL20WSHGS-158     -> over 157.5 total points
+# No time component; close_time unreliable (again) — ticker date only.
+WNBA_TEAMS = {
+    "atlanta": "ATL", "dream": "ATL", "chicago": "CHI", "sky": "CHI",
+    "connecticut": "CONN", "sun": "CONN", "dallas": "DAL", "wings": "DAL",
+    "golden state": "GS", "valkyries": "GS", "indiana": "IND",
+    "fever": "IND", "las vegas": "LV", "aces": "LV",
+    "los angeles": "LA", "sparks": "LA", "minnesota": "MIN", "lynx": "MIN",
+    "new york": "NY", "liberty": "NY", "phoenix": "PHX", "mercury": "PHX",
+    "portland": "POR", "fire": "POR", "seattle": "SEA", "storm": "SEA",
+    "toronto": "TOR", "tempo": "TOR", "washington": "WSH", "mystics": "WSH",
+}
+WNBA_CODES = set(WNBA_TEAMS.values())
+
+_WNBA_SPREAD_RE = re.compile(
+    r"KXWNBASPREAD-(\d{2})([A-Z]{3})(\d{2})([A-Z]+)-([A-Z]+?)(\d+)$")
+_WNBA_TOTAL_RE = re.compile(
+    r"KXWNBATOTAL-(\d{2})([A-Z]{3})(\d{2})([A-Z]+)-(\d+)$")
+
+
+def _wnba_key(name: str):
+    n = (name or "").lower()
+    for frag, code in WNBA_TEAMS.items():
+        if frag in n:
+            return code
+    return None
+
+
+def _split_wnba_blob(blob: str):
+    """Team codes run 2-4 chars (GS, CONN); try every split."""
+    for i in range(2, min(5, len(blob) - 1)):
+        a, h = blob[:i], blob[i:]
+        if a in WNBA_CODES and h in WNBA_CODES:
+            return a, h
+    return None, None
+
+
+def match_wnba_ladders(spread_mkts, total_mkts, fair_games, dists_by_key):
+    """Return quote targets for ladder rungs. dists_by_key caches fitted
+    GameDists per (date, away, home) so a 10-rung ladder fits once."""
+    import ladder
+    fair_idx = {}
+    for g in fair_games:
+        hk, ak = _wnba_key(g["home"]), _wnba_key(g["away"])
+        d = game_date(g["commence"])
+        if hk and ak and d:
+            fair_idx[(d, ak, hk)] = g
+
+    def dists_for(key, game):
+        if key not in dists_by_key:
+            dists_by_key[key] = ladder.GameDists(
+                ladder.build_margin_points(game),
+                ladder.build_total_points(game))
+        return dists_by_key[key]
+
+    out = []
+    for m in spread_mkts:
+        t = m.get("ticker", "")
+        mm = _WNBA_SPREAD_RE.match(t)
+        if not mm:
+            continue
+        yy, mon, dd, blob, team, k = mm.groups()
+        if mon not in MONTHS:
+            continue
+        try:
+            d = datetime.date(2000 + int(yy), MONTHS[mon], int(dd))
+        except ValueError:
+            continue
+        away, home = _split_wnba_blob(blob)
+        if not away or team not in (away, home):
+            continue
+        game = fair_idx.get((d, away, home))
+        if not game:
+            continue
+        thresh = m.get("floor_strike")
+        if thresh is None:
+            thresh = int(k) - 0.5
+        dist = dists_for((d, away, home), game)
+        fair = dist.spread_fair(team_is_home=(team == home),
+                                threshold=float(thresh))
+        if fair is None:
+            continue
+        out.append({"ticker": t, "yes_team": team, "fair_prob": fair,
+                    "commence": game["commence"],
+                    "title": m.get("title", t), "sharp": True,
+                    "uncertainty": game.get("uncertainty", 0.0),
+                    "n_books": game.get("n_books", 0),
+                    "event_key": t.rsplit("-", 1)[0], "ladder": "spread"})
+    for m in total_mkts:
+        t = m.get("ticker", "")
+        mm = _WNBA_TOTAL_RE.match(t)
+        if not mm:
+            continue
+        yy, mon, dd, blob, k = mm.groups()
+        if mon not in MONTHS:
+            continue
+        try:
+            d = datetime.date(2000 + int(yy), MONTHS[mon], int(dd))
+        except ValueError:
+            continue
+        away, home = _split_wnba_blob(blob)
+        if not away:
+            continue
+        game = fair_idx.get((d, away, home))
+        if not game:
+            continue
+        thresh = m.get("floor_strike")
+        if thresh is None:
+            thresh = int(k) - 0.5
+        dist = dists_for((d, away, home), game)
+        fair = dist.total_fair(float(thresh))
+        if fair is None:
+            continue
+        out.append({"ticker": t, "yes_team": None, "fair_prob": fair,
+                    "commence": game["commence"],
+                    "title": m.get("yes_sub_title", t), "sharp": True,
+                    "uncertainty": game.get("uncertainty", 0.0),
+                    "n_books": game.get("n_books", 0),
+                    "event_key": t.rsplit("-", 1)[0], "ladder": "total"})
+    return out

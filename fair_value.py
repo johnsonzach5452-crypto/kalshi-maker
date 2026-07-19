@@ -161,3 +161,100 @@ def fetch_games():
 
 def cache_age() -> float:
     return time.time() - _cache["ts"]
+
+
+# ── multi-sport, multi-market fetch (spreads/totals ladders) ──────────
+_sport_cache: dict = {}   # sport -> {"ts": t, "games": [...]}
+
+
+def fetch_sport(sport: str, markets: str = "h2h,spreads,totals",
+                regions: str = "us", cache_secs: int = 180):
+    """Odds for another sport with per-book spread/total lines attached:
+    game dicts gain spread_lines [(home_point, p_home_cover)] and
+    total_lines [(line, p_over)] for distribution fitting."""
+    now = time.time()
+    ent = _sport_cache.get(sport)
+    if ent and now - ent["ts"] < cache_secs and ent["games"]:
+        return ent["games"]
+    if not ODDS_API_KEY:
+        return []
+    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
+    params = {"apiKey": ODDS_API_KEY, "regions": regions,
+              "markets": markets, "oddsFormat": "american"}
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        rem = r.headers.get("x-requests-remaining")
+        if rem is not None:
+            quota.update({"remaining": float(rem), "checked": now})
+        if r.status_code != 200:
+            log.warning(f"odds api [{sport}] {r.status_code}: "
+                        f"{scrub(r.text[:150])}")
+            return (ent or {}).get("games", [])
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        log.warning(f"odds api [{sport}] error: {scrub(str(e))}")
+        if ent and now - ent["ts"] < 2 * cache_secs:
+            return ent["games"]      # briefly stale is fine
+        return []                    # too stale: quote nothing for sport
+
+    games = []
+    for g in data:
+        home, away = g.get("home_team"), g.get("away_team")
+        commence = g.get("commence_time")
+        ml, spreads, totals = [], [], []
+        for bk in g.get("bookmakers", []):
+            for mkt in bk.get("markets", []):
+                key = mkt.get("key")
+                ocs = mkt.get("outcomes", [])
+                if key == "h2h":
+                    ph = pa = None
+                    for oc in ocs:
+                        if oc.get("name") == home:
+                            ph = american_to_prob(oc.get("price", 0))
+                        elif oc.get("name") == away:
+                            pa = american_to_prob(oc.get("price", 0))
+                    if ph and pa:
+                        dh, da = devig(ph, pa)
+                        if dh:
+                            ml.append((dh, da))
+                elif key == "spreads":
+                    ph = pa = pt = None
+                    for oc in ocs:
+                        if oc.get("name") == home:
+                            ph, pt = american_to_prob(oc.get("price", 0)), oc.get("point")
+                        elif oc.get("name") == away:
+                            pa = american_to_prob(oc.get("price", 0))
+                    if ph and pa and pt is not None:
+                        dh, _ = devig(ph, pa)
+                        if dh:
+                            spreads.append((float(pt), dh))
+                elif key == "totals":
+                    po = pu = pt = None
+                    for oc in ocs:
+                        nm = (oc.get("name") or "").lower()
+                        if nm == "over":
+                            po, pt = american_to_prob(oc.get("price", 0)), oc.get("point")
+                        elif nm == "under":
+                            pu = american_to_prob(oc.get("price", 0))
+                    if po and pu and pt is not None:
+                        do, _ = devig(po, pu)
+                        if do:
+                            totals.append((float(pt), do))
+        if len(ml) < MIN_BOOKS:
+            continue
+        if CONSENSUS == "median":
+            hp = statistics.median(p[0] for p in ml)
+            ap = 1.0 - hp
+        else:
+            hp = sum(p[0] for p in ml) / len(ml)
+            ap = sum(p[1] for p in ml) / len(ml)
+        unc = statistics.pstdev([p[0] for p in ml]) if len(ml) >= 2 else 0.0
+        games.append({"home": home, "away": away, "commence": commence,
+                      "home_prob": hp, "away_prob": ap, "n_books": len(ml),
+                      "sharp": True, "uncertainty": unc,
+                      "spread_lines": spreads, "total_lines": totals})
+    _sport_cache[sport] = {"ts": now, "games": games}
+    log.info(f"[{sport}] {len(games)} games priced "
+             f"({sum(len(g['spread_lines']) for g in games)} spread lines, "
+             f"{sum(len(g['total_lines']) for g in games)} total lines)")
+    return games

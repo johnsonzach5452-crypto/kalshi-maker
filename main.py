@@ -26,8 +26,8 @@ import config as C
 import store
 from kalshi_client import (KalshiClient, KalshiError, KalshiUnavailable,
                            norm_order)
-from fair_value import fetch_games, cache_age, quota
-from matcher import match_markets
+from fair_value import fetch_games, cache_age, quota, fetch_sport
+from matcher import match_markets, match_wnba_ladders
 from notify import notify, install_log_scrubber
 from quoter import (Risk, desired_quotes, clamp_to_book, cooldowns,
                     maker_fee_cents, minutes_to_commence, is_steaming,
@@ -209,7 +209,25 @@ class Maker:
                                         t.get("uncertainty", 0.0), t["commence"])
             for q in desired_quotes(t, uncertainty=t.get("uncertainty", 0.0),
                                     net_position=inventory.get(t["ticker"])):
+                if t.get("ladder"):
+                    # rung sizing: small per rung, capped per GAME —
+                    # rungs on one ladder settle together (correlated)
+                    q["count"] = max(1, min(
+                        q["count"], C.LADDER_RUNG_CAP // max(q["price"], 1)))
+                    q["event_key"] = t["event_key"]
                 want[(t["ticker"], q["side"])] = {**q, "ticker": t["ticker"]}
+        # enforce per-event cap across all rungs of the same game
+        spend: dict = {}
+        for key in list(want):
+            q = want[key]
+            ek = q.get("event_key")
+            if not ek:
+                continue
+            cost = q["price"] * q["count"]
+            if spend.get(ek, 0) + cost > C.PER_EVENT_CAP:
+                del want[key]
+            else:
+                spend[ek] = spend.get(ek, 0) + cost
         return want
 
     def _book(self, ticker, cache: dict):
@@ -546,8 +564,10 @@ class Maker:
 
         # 3. Fair values
         games = fetch_games()
-        if cache_age() > C.STALE_FAIR_SECS or not games:
-            log.warning("fair values stale/empty — pulling all quotes")
+        # Multi-sport: an empty MLB slate must NOT kill other sports.
+        # Only a genuinely STALE feed (age gate) pulls everything.
+        if cache_age() > C.STALE_FAIR_SECS:
+            log.warning("fair values stale — pulling all quotes")
             if self.paper:
                 self.paper.sync({})
             else:
@@ -564,6 +584,29 @@ class Maker:
             notify(f"⚠️ No open markets found for series '{C.KALSHI_SERIES}'. "
                    "Check KALSHI_SERIES env var against kalshi.com tickers.")
         targets = match_markets(markets, games)
+
+        # v5.1: WNBA strike ladders (the scanner's pick: 4-9c spreads,
+        # thin touches). Fit each game's margin/total distribution once,
+        # price every rung off the curve, quote the tradeable middle.
+        if C.WNBA_ENABLED:
+            try:
+                wgames = fetch_sport(C.WNBA_ODDS_SPORT)
+                if wgames:
+                    sm = self.client.get_markets(
+                        series_ticker=C.WNBA_SERIES_SPREAD)
+                    tm = self.client.get_markets(
+                        series_ticker=C.WNBA_SERIES_TOTAL)
+                    self._wnba_dists = {}
+                    rungs = match_wnba_ladders(sm, tm, wgames,
+                                               self._wnba_dists)
+                    kept = [r for r in rungs
+                            if C.LADDER_MIN_FAIR <= r["fair_prob"]
+                            <= C.LADDER_MAX_FAIR]
+                    log.info(f"WNBA: {len(rungs)} rungs priced, "
+                             f"{len(kept)} in tradeable band")
+                    targets = targets + kept
+            except KalshiError as e:
+                log.warning(f"WNBA markets fetch failed: {e}")
 
         if self.paper:
             inventory = {i["ticker"]: {"net": i["net"], "cost": i["cost_cents"]}

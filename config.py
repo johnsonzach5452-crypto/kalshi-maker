@@ -162,3 +162,17 @@ JUMP_QUEUE_MIN    = _i("JUMP_QUEUE_MIN", 100)   # contracts ahead to justify a j
 PENNY_WAR_MAX     = _i("PENNY_WAR_MAX", 3)      # step-ups on one market/side...
 PENNY_WAR_WINDOW  = _i("PENNY_WAR_WINDOW", 240) # ...within this window = a war
 PENNY_WAR_PAUSE   = _i("PENNY_WAR_PAUSE", 600)  # stand down this long
+
+# ── v5.1 WNBA ladder markets ───────────────────────────────────────────
+# 4-9c spreads, thin touches, daily games: the pond the scanner picked.
+WNBA_ENABLED      = _i("WNBA_ENABLED", 1)
+WNBA_ODDS_SPORT   = _s("WNBA_ODDS_SPORT", "basketball_wnba")
+WNBA_SERIES_SPREAD = _s("WNBA_SERIES_SPREAD", "KXWNBASPREAD")
+WNBA_SERIES_TOTAL  = _s("WNBA_SERIES_TOTAL", "KXWNBATOTAL")
+LADDER_MIN_FAIR   = _f("LADDER_MIN_FAIR", 0.12)  # skip deep-longshot rungs
+LADDER_MAX_FAIR   = _f("LADDER_MAX_FAIR", 0.88)
+LADDER_RUNG_CAP   = _i("LADDER_RUNG_CAP", 1000)  # $10 per rung
+PER_EVENT_CAP     = _i("PER_EVENT_CAP", 4000)    # $40 per GAME across all
+                                                 # rungs (rungs correlate!)
+# Odds API budget: MLB+WNBA both at 180s cache with h2h,spreads,totals
+# for WNBA (us region) lands ~72K credits/mo — inside the 100K plan.
