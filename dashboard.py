@@ -128,6 +128,72 @@ def fetch_all(d: date, min_ev: float, market: str):
     return edges, games, openers, dists, (nbets or 0, clv, wins or 0, losses or 0)
 
 
+BASE_MARKETS = ["pitcher_strikeouts", "pitcher_outs", "pitcher_hits_allowed",
+                "pitcher_walks", "pitcher_earned_runs"]
+
+
+def fetch_sheet(d: date):
+    """Every pitcher with a projection + the main (non-alt) line per market.
+    This is the reference sheet: no edge filter, no alt lines."""
+    import statistics
+    from .devig import fair_probs
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (pitcher_name, market)
+                   pitcher_name, market, distribution
+            FROM projections
+            WHERE created_at > now() - interval '30 hours'
+            ORDER BY pitcher_name, market, created_at DESC
+        """)
+        dists: dict = {}
+        for name, mkt, dist in cur.fetchall():
+            dd = dist if isinstance(dist, dict) else json.loads(dist)
+            dists.setdefault(name, {})[mkt] = {int(k): float(v)
+                                               for k, v in dd.items()}
+        names = list(dists.keys())
+        quotes: dict = {}
+        games: dict = {}
+        pit_game: dict = {}
+        if names:
+            cur.execute("""
+                SELECT DISTINCT ON (player, market, bookmaker)
+                       player, market, line, bookmaker, over_price,
+                       under_price, event_id
+                FROM odds_snapshots
+                WHERE player = ANY(%s) AND market = ANY(%s)
+                  AND commence_time > now()
+                  AND commence_time < now() + interval '30 hours'
+                  AND fetched_at > now() - interval '12 hours'
+                ORDER BY player, market, bookmaker, fetched_at DESC
+            """, (names, BASE_MARKETS))
+            per: dict = {}
+            for pl, mk, ln, bk, op, up, eid in cur.fetchall():
+                if ln is None:
+                    continue
+                per.setdefault((pl, mk), []).append(
+                    (float(ln), op, up, bk, eid))
+                pit_game.setdefault(pl, eid)
+            for (pl, mk), qs in per.items():
+                lines = [q[0] for q in qs]
+                main = statistics.mode(lines)
+                at = [q for q in qs if q[0] == main]
+                fos = [fair_probs(int(q[1]), int(q[2]))[0]
+                       for q in at if q[1] is not None and q[2] is not None]
+                cons = statistics.median(fos) if fos else None
+                quotes[(pl, mk)] = (main, cons, len(at))
+            ev_ids = list({e for e in pit_game.values() if e})
+            if ev_ids:
+                cur.execute("""
+                    SELECT DISTINCT ON (event_id) event_id, home_team,
+                           away_team, commence_time
+                    FROM odds_snapshots WHERE event_id = ANY(%s)
+                    ORDER BY event_id, fetched_at DESC
+                """, (ev_ids,))
+                for eid, home, away, ct in cur.fetchall():
+                    games[eid] = {"home": home, "away": away, "start": ct}
+    return dists, quotes, games, pit_game
+
+
 # ------------------------------------------------------------ math helpers
 
 def _mean(dist):
@@ -249,9 +315,75 @@ def api_edges(request: Request, day: str | None = None, min_ev: float = 0.0,
 
 # ------------------------------------------------------------ page
 
+SHEET_LABEL = {"pitcher_strikeouts": "K", "pitcher_outs": "Outs",
+               "pitcher_hits_allowed": "Hits allowed",
+               "pitcher_walks": "Walks", "pitcher_earned_runs": "ER"}
+
+
+def render_sheet(d: date, key: str) -> str:
+    dists, quotes, games, pit_game = fetch_sheet(d)
+    # group pitchers by game, ordered by start time
+    by_game: dict = {}
+    for name in dists:
+        by_game.setdefault(pit_game.get(name), []).append(name)
+    def gkey(eid):
+        g = games.get(eid)
+        return (g is None, g["start"] if g else None)
+    blocks = []
+    for eid in sorted(by_game, key=gkey):
+        meta = games.get(eid, {})
+        matchup = (f'{meta.get("away","")} @ {meta.get("home","")}'
+                   if meta else "No lines posted yet")
+        when = countdown(meta.get("start"))
+        pcards = []
+        for name in sorted(by_game[eid]):
+            pd = dists[name]
+            rows = []
+            for mk in BASE_MARKETS:
+                sim = SIM_KEY[mk]
+                dist = pd.get(sim)
+                if not dist:
+                    continue
+                proj = _mean(dist)
+                q = quotes.get((name, mk))
+                if q:
+                    line, cons, nb = q
+                    p_over = _p_over(dist, line)
+                    wm = blend_weight(mk)
+                    pc = calibrated_prob(p_over)
+                    pb = wm * pc + (1 - wm) * cons if cons is not None else pc
+                    pb = min(max(pb, .02), .98)
+                    fo = prob_to_american(pb)
+                    fu = prob_to_american(1 - pb)
+                    lean = ("over" if proj > line + 0.15 else
+                            "under" if proj < line - 0.15 else "")
+                    rows.append(f"""<div class="srow">
+<span class="smkt">{SHEET_LABEL[mk]}</span>
+<span class="sline">{line}</span>
+<span class="sproj{' lo' if lean=='under' else ' hi' if lean=='over' else ''}">{proj:.1f}</span>
+<span class="spct">{pb:.0%} o</span>
+<span class="sfair">o {fmt_px(fo)} · u {fmt_px(fu)}</span></div>""")
+                else:
+                    rows.append(f"""<div class="srow dim">
+<span class="smkt">{SHEET_LABEL[mk]}</span>
+<span class="sline">—</span>
+<span class="sproj">{proj:.1f}</span>
+<span class="spct"></span>
+<span class="sfair">no line</span></div>""")
+            if rows:
+                pcards.append(f"""<div class="scard"><h3>{name}</h3>
+<div class="shead"><span>Mkt</span><span>Line</span><span>Proj</span>
+<span>Model</span><span>Fair o/u</span></div>{''.join(rows)}</div>""")
+        if pcards:
+            blocks.append(f"""<section class="sgame">
+<div class="ghead"><h2>{matchup}</h2><p>{when}</p></div>
+<div class="sgrid">{''.join(pcards)}</div></section>""")
+    return "".join(blocks) or '<div class="none">No projections yet today — projector runs 12/14/20/22 UTC.</div>'
+
+
 @app.get("/", response_class=HTMLResponse)
 def board(request: Request, day: str | None = None, min_ev: float = 2.0,
-          market: str = "all", tier: str = "all"):
+          market: str = "all", tier: str = "all", view: str = "edges"):
     _gate(request)
     d = date.fromisoformat(day) if day else date.today()
     key = request.query_params.get("key", "")
@@ -270,8 +402,14 @@ def board(request: Request, day: str | None = None, min_ev: float = 2.0,
 
     def href(**kw):
         p = {"key": key, "min_ev": min_ev, "market": market, "tier": tier,
-             "day": d.isoformat(), **kw}
+             "day": d.isoformat(), "view": view, **kw}
         return "/?" + "&".join(f"{k}={v}" for k, v in p.items())
+
+    view_pills = (
+        f'<a class="chip{" on" if view == "edges" else ""}" '
+        f'href="{href(view="edges")}">🔥 Edges</a>'
+        f'<a class="chip{" on" if view == "sheet" else ""}" '
+        f'href="{href(view="sheet")}">📋 Sheet</a>')
 
     ranked = sorted(edges, key=lambda e: (TIER_ORDER[e["tier"]],
                                           -float(e["ev_pct"])))
@@ -444,6 +582,24 @@ text-transform:uppercase;padding:4px 0}}
 .ev em{{display:block;height:3px;background:var(--edge);border-radius:2px;
 margin-top:3px;overflow:hidden}}
 .ev em i{{display:block;height:100%;background:var(--green)}}
+.sgame{{background:var(--card);border:1px solid var(--edge);border-radius:12px;
+margin:12px 0;overflow:hidden}}
+.sgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+gap:0 18px;padding:4px 15px 12px}}
+.scard h3{{margin:10px 0 4px;font:700 14px var(--disp)}}
+.shead,.srow{{display:grid;grid-template-columns:78px 44px 46px 56px 1fr;
+gap:6px;align-items:center;font-size:12.5px}}
+.shead{{color:var(--dim);font-size:9.5px;letter-spacing:.1em;
+text-transform:uppercase;padding:2px 0}}
+.srow{{padding:4px 0;border-top:1px solid var(--edge)}}
+.srow.dim{{opacity:.5}}
+.smkt{{color:var(--dim)}}
+.sline{{font-weight:600}}
+.sproj{{color:var(--amber);font-weight:700}}
+.sproj.hi{{color:var(--green)}}
+.sproj.lo{{color:var(--red)}}
+.spct{{color:var(--dim)}}
+.sfair{{text-align:right;font-variant-numeric:tabular-nums}}
 .none{{color:var(--dim);text-align:center;padding:50px 0;
 border:1px dashed var(--edge);border-radius:12px}}
 .paper{{position:fixed;left:0;right:0;bottom:0;background:#0D1119EE;
@@ -464,12 +620,14 @@ gap:22px;justify-content:center;padding:8px;font-size:12px;color:var(--dim)}}
     {d}{' · today' if d == date.today() else ''}
     <a class="dnav" href="{href(day=(d + timedelta(days=1)).isoformat())}">›</a>
     · 🔥{n_strong} 🎯{n_solid}</small></div>
-  <div class="filters">{tier_chips}<span style="width:8px"></span>{ev_chips}</div>
+  <div class="filters">{view_pills}<span style="width:12px"></span>{tier_chips if view == "edges" else ''}{('<span style="width:8px"></span>' + ev_chips) if view == "edges" else ''}</div>
 </div>
-<h1 class="sec">Top edges</h1>
-<div class="heroes">{hero_html or '<div class="none">quiet board</div>'}</div>
-<h1 class="sec">Slate · sorted by edge</h1>
-{''.join(sections)}{empty}
+{('<h1 class="sec">Top edges</h1>'
+   f'<div class="heroes">{hero_html or chr(60)+"div class="+chr(34)+"none"+chr(34)+chr(62)+"quiet board</div>"}</div>'
+   '<h1 class="sec">Slate · sorted by edge</h1>'
+   + ''.join(sections) + empty) if view == "edges"
+  else ('<h1 class="sec">Pitcher sheet · every base line · model priced</h1>'
+        + render_sheet(d, key))}
 <div class="legend"><b>Fair</b> = the price the model says each book line is
 worth (calibrated, market-weighted) — value when the book pays more.
 <b>Model line</b> = where the model thinks the line itself belongs.

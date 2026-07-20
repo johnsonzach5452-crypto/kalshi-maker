@@ -52,8 +52,12 @@ FROM odds_snapshots
 WHERE commence_time > now() AND commence_time < now() + interval '30 hours'
   AND fetched_at > now() - interval '90 minutes'
   AND over_price IS NOT NULL AND under_price IS NOT NULL
+  AND market NOT LIKE 'batter_%%'
 ORDER BY event_id, market, line, bookmaker, player, fetched_at DESC
 """
+
+# opt-in only; batter markets stay excluded above regardless
+INCLUDE_BATTERS = os.environ.get("VALUE_INCLUDE_BATTERS", "0") == "1"
 
 PRETTY = {
     "h2h": "Moneyline", "totals": "Total", "spreads": "Run line",

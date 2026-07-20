@@ -48,7 +48,7 @@ BATTER_MARKETS = [
     "batter_home_runs", "batter_hits", "batter_total_bases",
     "batter_rbis", "batter_runs_scored", "batter_hits_runs_rbis",
 ]
-SCAN_ALL_MARKETS = os.environ.get("SCAN_ALL_MARKETS", "1") == "1"
+SCAN_ALL_MARKETS = os.environ.get("SCAN_ALL_MARKETS", "0") == "1"
 
 
 def _prop_markets() -> list[str]:
