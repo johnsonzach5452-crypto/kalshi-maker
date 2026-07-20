@@ -42,11 +42,23 @@ DEFAULT_PROP_MARKETS = [
     "pitcher_earned_runs",
 ]
 GAME_MARKETS = ["h2h", "totals", "spreads"]
+# With a large credit budget, log the full batter-prop board too so the
+# value scanner can hunt exchange mispricings across every market.
+BATTER_MARKETS = [
+    "batter_home_runs", "batter_hits", "batter_total_bases",
+    "batter_rbis", "batter_runs_scored", "batter_hits_runs_rbis",
+]
+SCAN_ALL_MARKETS = os.environ.get("SCAN_ALL_MARKETS", "1") == "1"
 
 
 def _prop_markets() -> list[str]:
     env = os.environ.get("PROP_MARKETS")
-    return [m.strip() for m in env.split(",")] if env else DEFAULT_PROP_MARKETS
+    if env:
+        return [m.strip() for m in env.split(",")]
+    mkts = list(DEFAULT_PROP_MARKETS)
+    if SCAN_ALL_MARKETS:
+        mkts += BATTER_MARKETS
+    return mkts
 
 
 class OddsAPI:
