@@ -580,12 +580,26 @@ class Maker:
             return
 
         # 4. Match + build desired quotes
-        markets = self.client.get_markets(series_ticker=C.KALSHI_SERIES)
-        if not markets and not getattr(self, "_warned_series", False):
+        markets = []
+        if C.MLB_ENABLED:
+            markets = self.client.get_markets(series_ticker=C.KALSHI_SERIES)
+        if C.MLB_ENABLED and not markets and not getattr(self, "_warned_series", False):
             self._warned_series = True
             notify(f"⚠️ No open markets found for series '{C.KALSHI_SERIES}'. "
                    "Check KALSHI_SERIES env var against kalshi.com tickers.")
         targets = match_markets(markets, games)
+        if C.MLB_MAX_MARKETS and targets:
+            # keep only the MLB markets closest to first pitch (most likely
+            # to matter); WNBA is appended full-strength below
+            seen, capped = set(), []
+            for t in sorted(targets, key=lambda x: minutes_to_commence(x["commence"])):
+                mk = t["ticker"].rsplit("-", 1)[0]
+                if mk not in seen:
+                    if len(seen) >= C.MLB_MAX_MARKETS:
+                        continue
+                    seen.add(mk)
+                capped.append(t)
+            targets = capped
 
         # v5.1: WNBA strike ladders (the scanner's pick: 4-9c spreads,
         # thin touches). Fit each game's margin/total distribution once,

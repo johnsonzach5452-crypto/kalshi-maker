@@ -192,3 +192,14 @@ PER_EVENT_CAP     = _i("PER_EVENT_CAP", 6000)     # $60/game (was 40)
 # Distribution confidence gate: only quote a ladder if the fit used >=2
 # real spread/total lines (not just moneyline) — thin fits misprice tails.
 LADDER_MIN_LINES  = _i("LADDER_MIN_LINES", 1)
+
+# ── v5.4 WNBA-first allocation ─────────────────────────────────────────
+# MLB game markets fill ~nothing (institutional 1c walls); WNBA ladders
+# are where fills happen. Shift capital and slots toward WNBA.
+#   MLB_ENABLED=0     -> stop quoting MLB entirely (pure WNBA)
+#   MLB_MAX_MARKETS   -> cap how many MLB markets can rest at once
+#   MLB_TOTAL_CAP     -> hard dollar cap on ALL resting MLB exposure
+# WNBA keeps the full TOTAL_CAP minus whatever MLB is using.
+MLB_ENABLED       = _i("MLB_ENABLED", 1)
+MLB_MAX_MARKETS   = _i("MLB_MAX_MARKETS", 4)     # was effectively unlimited
+MLB_TOTAL_CAP     = _i("MLB_TOTAL_CAP", 8000)    # $80 max across all MLB
