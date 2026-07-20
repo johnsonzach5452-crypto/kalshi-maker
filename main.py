@@ -25,7 +25,7 @@ import time
 import config as C
 import store
 from kalshi_client import (KalshiClient, KalshiError, KalshiUnavailable,
-                           norm_order)
+                           norm_order, norm_position, fill_fee_cents)
 from fair_value import fetch_games, cache_age, quota, fetch_sport
 from matcher import match_markets, match_wnba_ladders
 from notify import notify, install_log_scrubber
@@ -149,10 +149,13 @@ class Maker:
         for f in fills:
             fid = f.get("trade_id") or f.get("fill_id") or ""
             side, px, cnt = norm_order(f)   # fills use the same dialects
-            tkr = f.get("ticker", "?")
+            tkr = f.get("market_ticker") or f.get("ticker") or "?"
+            if not cnt:
+                continue
             fair = self.side_fair(tkr, side)
             edge = (fair - px) if fair is not None else None
-            fee = maker_fee_cents(px, cnt)
+            reported = fill_fee_cents(f)
+            fee = reported if reported is not None else maker_fee_cents(px, cnt)
             if not store.record_fill(fid, tkr, side, px, cnt,
                                      fair_at_fill=fair, edge_at_fill=edge,
                                      fee_cents=fee):
@@ -210,11 +213,10 @@ class Maker:
             for q in desired_quotes(t, uncertainty=t.get("uncertainty", 0.0),
                                     net_position=inventory.get(t["ticker"])):
                 if t.get("ladder"):
-                    # rung sizing: small per rung, capped per GAME —
-                    # rungs on one ladder settle together (correlated)
                     q["count"] = max(1, min(
                         q["count"], C.LADDER_RUNG_CAP // max(q["price"], 1)))
                     q["event_key"] = t["event_key"]
+                    q["ladder"] = t["ladder"]
                 want[(t["ticker"], q["side"])] = {**q, "ticker": t["ticker"]}
         # enforce per-event cap across all rungs of the same game
         spend: dict = {}
@@ -417,10 +419,10 @@ class Maker:
                 inv = self.paper.inventory()
             else:
                 for p in positions or []:
-                    net = p.get("position", 0)
-                    if net or p.get("market_exposure"):
-                        inv.append({"ticker": p.get("ticker", "?"), "net": net,
-                                    "cost_cents": abs(p.get("market_exposure", 0))})
+                    tkr, net, exp = norm_position(p)
+                    if net or exp:
+                        inv.append({"ticker": tkr or "?", "net": net,
+                                    "cost_cents": exp})
             is_sim = bool(self.paper)
             open_q = ([{"ticker": o["ticker"], "side": o["side"],
                         "price": o["price"], "count": o["count"],
@@ -612,9 +614,11 @@ class Maker:
             inventory = {i["ticker"]: {"net": i["net"], "cost": i["cost_cents"]}
                          for i in self.paper.inventory()}
         else:
-            inventory = {p.get("ticker"): {"net": p.get("position", 0),
-                                           "cost": abs(p.get("market_exposure", 0))}
-                         for p in positions}
+            inventory = {}
+            for p in positions:
+                tkr, net, exp = norm_position(p)
+                if tkr:
+                    inventory[tkr] = {"net": net, "cost": exp}
         want = self.build_want(targets, inventory)
 
         # adaptive cadence: near first pitch, stale quotes are pick-off

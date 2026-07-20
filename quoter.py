@@ -126,6 +126,7 @@ def _solve_price(fair: float, margin: int, min_edge: int):
 # ── quote construction (items C11, C12, C13) ───────────────────────────
 def desired_quotes(target, uncertainty: float = 0.0,
                    net_position: dict = None) -> list:
+    _is_ladder = bool(target.get("ladder"))
     """For one matched market, return the quotes we want resting.
 
     target: {ticker, fair_prob, commence, ...}
@@ -166,7 +167,10 @@ def desired_quotes(target, uncertainty: float = 0.0,
         # C12: inventory skew — long YES? shade YES away, tighten NO (and
         # vice versa). The flattening side also gets a relaxed edge floor:
         # cutting inventory risk is worth accepting less edge.
-        margin, min_edge = C.MARGIN_CENTS + extra, C.MIN_EDGE_CENTS
+        if _is_ladder:
+            margin, min_edge = C.LADDER_MARGIN + extra, C.LADDER_MIN_EDGE
+        else:
+            margin, min_edge = C.MARGIN_CENTS + extra, C.MIN_EDGE_CENTS
         if net > 0:      # long YES
             if side == "yes":
                 margin += skew

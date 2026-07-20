@@ -176,3 +176,19 @@ PER_EVENT_CAP     = _i("PER_EVENT_CAP", 4000)    # $40 per GAME across all
                                                  # rungs (rungs correlate!)
 # Odds API budget: MLB+WNBA both at 180s cache with h2h,spreads,totals
 # for WNBA (us region) lands ~72K credits/mo — inside the 100K plan.
+
+# ── v5.3 fill expansion (edge preserved) ───────────────────────────────
+# WNBA maker fills are FEE-FREE and we're collecting spread. Expand
+# coverage without lowering the edge floor:
+#  - widen the tradeable rung band (more strikes per ladder in play)
+#  - a dedicated, higher edge floor for ladders (thin books let us keep
+#    more edge than the 1c MLB war floor — take it)
+#  - raise per-event cap now that we know fills are real & fee-free
+LADDER_MIN_FAIR   = _f("LADDER_MIN_FAIR", 0.08)   # was 0.12 — more rungs live
+LADDER_MAX_FAIR   = _f("LADDER_MAX_FAIR", 0.92)   # was 0.88
+LADDER_MIN_EDGE   = _i("LADDER_MIN_EDGE", 3)      # ladder-specific floor
+LADDER_MARGIN     = _i("LADDER_MARGIN", 3)        # min cents off fair
+PER_EVENT_CAP     = _i("PER_EVENT_CAP", 6000)     # $60/game (was 40)
+# Distribution confidence gate: only quote a ladder if the fit used >=2
+# real spread/total lines (not just moneyline) — thin fits misprice tails.
+LADDER_MIN_LINES  = _i("LADDER_MIN_LINES", 1)

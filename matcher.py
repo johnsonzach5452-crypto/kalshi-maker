@@ -230,6 +230,8 @@ def match_wnba_ladders(spread_mkts, total_mkts, fair_games, dists_by_key):
             dists_by_key[key] = ladder.GameDists(
                 ladder.build_margin_points(game),
                 ladder.build_total_points(game))
+            dists_by_key[key]._n_spread = len(game.get("spread_lines", []))
+            dists_by_key[key]._n_total = len(game.get("total_lines", []))
         return dists_by_key[key]
 
     out = []

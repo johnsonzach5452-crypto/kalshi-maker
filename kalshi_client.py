@@ -380,23 +380,48 @@ def norm_order(o: dict):
     for k in ("remaining_count", "count"):
         if o.get(k) is not None:
             try:
-                cnt = int(o[k])
-                break
+                cnt = int(o[k]); break
             except (TypeError, ValueError):
                 pass
     if not cnt:
-        for k in ("remaining_count_fp", "count_fp", "initial_count_fp"):
+        for k in ("count_fp", "remaining_count_fp", "initial_count_fp"):
             if o.get(k) is not None:
                 try:
-                    cnt = int(float(o[k]))
-                    break
+                    cnt = int(float(o[k])); break
                 except (TypeError, ValueError):
                     pass
     return s, px, cnt
 
 
+def fill_fee_cents(f: dict):
+    """Kalshi reports the actual fee on each fill (fee_cost, dollars).
+    Prefer it over our estimate — WNBA maker fills come back 0."""
+    for k in ("fee_cost", "fee_paid_dollars", "maker_fees_dollars"):
+        if f.get(k) is not None:
+            try:
+                return round(float(f[k]) * 100, 2)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 def position_exposure_cents(p: dict) -> int:
     return abs(_num_cents(p, "market_exposure", "market_exposure_dollars"))
+
+
+def norm_position(p: dict):
+    """-> (ticker, net_contracts, exposure_cents) across dialects.
+    V2 uses position_fp (fixed-point) and market_exposure_dollars; net is
+    +long YES / -long NO."""
+    net = 0
+    for k in ("position", "position_fp"):
+        if p.get(k) is not None:
+            try:
+                net = int(float(p[k]))
+                break
+            except (TypeError, ValueError):
+                pass
+    return p.get("ticker"), net, position_exposure_cents(p)
 
 
 def kalshi_fee_cents(price_cents: int, count: int) -> float:
