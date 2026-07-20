@@ -1,4 +1,4 @@
-# Kalshi Passive Maker — v4.7
+# Kalshi Passive Maker — v5.4 (WNBA ladders + MLB toggle)
 
 Rests limit orders on Kalshi MLB game markets at devigged sharp consensus
 (Pinnacle/Circa/BetOnline via The Odds API) minus an edge that must clear
