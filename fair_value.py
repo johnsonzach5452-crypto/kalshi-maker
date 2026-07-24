@@ -65,6 +65,17 @@ def devig(p_a: float, p_b: float):
     return devig_two_way(p_a, p_b)
 
 
+def devig_three_way(p_h: float, p_d: float, p_a: float):
+    """Soccer: home / draw / away. Multiplicative devig across three
+    outcomes (power method is ill-posed on 3-way; multiplicative is the
+    standard and the vig is spread proportionally).
+    Returns (home, draw, away) summing to 1, or (None, None, None)."""
+    total = (p_h or 0) + (p_d or 0) + (p_a or 0)
+    if total <= 0:
+        return None, None, None
+    return p_h / total, p_d / total, p_a / total
+
+
 def fetch_games():
     """Return list of {home, away, commence, home_prob, away_prob,
     n_books, sharp, uncertainty, books}.

@@ -206,3 +206,14 @@ LADDER_MIN_LINES  = _i("LADDER_MIN_LINES", 1)
 MLB_ENABLED       = _i("MLB_ENABLED", 1)
 MLB_MAX_MARKETS   = _i("MLB_MAX_MARKETS", 4)     # was effectively unlimited
 MLB_TOTAL_CAP     = _i("MLB_TOTAL_CAP", 8000)    # $80 max across all MLB
+
+# ── v5.6 logit-space inventory skew (Avellaneda-Stoikov, opt-in) ───────
+# Our cent-based skew shades a flat N cents at any price, but a cent is
+# ~2% of the odds at 50c and ~12% at 8c. The prediction-market A&S
+# adaptation (arXiv 2510.15205) skews in log-odds instead: scale-free,
+# and it decays as settlement approaches (less time for the price to move
+# against inventory). OFF by default -- turn on and compare CLV.
+LOGIT_SKEW        = _i("LOGIT_SKEW", 0)        # 1 = use logit skew
+LOGIT_GAMMA       = _f("LOGIT_GAMMA", 0.35)    # risk aversion
+LOGIT_SIGMA       = _f("LOGIT_SIGMA", 1.10)    # belief vol (logit units)
+LOGIT_HORIZON_MIN = _f("LOGIT_HORIZON_MIN", 2880.0)  # tau=1 at 48h out

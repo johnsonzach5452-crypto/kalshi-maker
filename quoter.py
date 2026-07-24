@@ -98,11 +98,27 @@ def maker_fee_cents(price_cents: int, count: int) -> float:
 
 
 def inventory_skew_cents(net_cost_cents: int) -> int:
-    """Shading, scaled by how much of the per-market cap the position uses."""
+    """Shading, scaled by how much of the per-market cap the position uses.
+    (Legacy cent-linear path; see logit_inventory_skew for the A&S one.)"""
     if not net_cost_cents:
         return 0
     frac = min(1.0, abs(net_cost_cents) / max(C.PER_MARKET_CAP, 1))
     return int(round(frac * C.MAX_INV_SKEW_CENTS))
+
+
+def logit_inventory_skew(fair_cents: float, net_cost_cents: int,
+                         mins_to_start: float) -> int:
+    """A&S skew in log-odds space (config.LOGIT_SKEW). Returns cents to
+    shade, same sign convention as inventory_skew_cents (always >= 0;
+    the caller decides which side widens)."""
+    if not net_cost_cents:
+        return 0
+    import logit_skew as LS
+    q_units = min(1.0, abs(net_cost_cents) / max(C.PER_MARKET_CAP, 1))
+    tau = LS.tau_from_minutes(mins_to_start, C.LOGIT_HORIZON_MIN)
+    delta = LS.skew_cents(fair_cents, q_units, C.LOGIT_GAMMA,
+                          C.LOGIT_SIGMA, tau, float(C.MAX_INV_SKEW_CENTS))
+    return int(round(abs(delta)))
 
 
 def _solve_price(fair: float, margin: int, min_edge: int):
@@ -155,7 +171,11 @@ def desired_quotes(target, uncertainty: float = 0.0,
         extra += C.UNC_WIDEN_CENTS
 
     net = (net_position or {}).get("net", 0)
-    skew = inventory_skew_cents((net_position or {}).get("cost", 0))
+    _cost = (net_position or {}).get("cost", 0)
+    if C.LOGIT_SKEW:
+        skew = logit_inventory_skew(fair_yes, _cost, mins)
+    else:
+        skew = inventory_skew_cents(_cost)
 
     now = time.time()
     quotes = []
