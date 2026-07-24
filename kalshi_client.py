@@ -424,6 +424,21 @@ def norm_position(p: dict):
     return p.get("ticker"), net, position_exposure_cents(p)
 
 
+def norm_settlement(s: dict):
+    """-> (revenue_cents, cost_cents, fee_cents) across dialects.
+
+    V2 returns revenue as int CENTS but costs/fees as DOLLAR STRINGS
+    ('47.845200'). The old integer keys (yes_total_cost) are gone, so
+    reading them yielded 0 -- wins were booked at full payout and losses
+    at zero. This normalizer is the fix.
+    """
+    rev = _num_cents(s, "revenue", "revenue_dollars")
+    cost = (_num_cents(s, "yes_total_cost", "yes_total_cost_dollars")
+            + _num_cents(s, "no_total_cost", "no_total_cost_dollars"))
+    fee = _num_cents(s, "fee_paid", "fee_cost")
+    return rev, cost, fee
+
+
 def kalshi_fee_cents(price_cents: int, count: int) -> float:
     """Kalshi TAKER fee: ceil(0.07 * C * P * (1-P)) to next cent. Returns cents."""
     p = price_cents / 100.0

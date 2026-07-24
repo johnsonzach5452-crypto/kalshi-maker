@@ -25,7 +25,8 @@ import time
 import config as C
 import store
 from kalshi_client import (KalshiClient, KalshiError, KalshiUnavailable,
-                           norm_order, norm_position, fill_fee_cents)
+                           norm_order, norm_position, fill_fee_cents,
+                           norm_settlement)
 from fair_value import fetch_games, cache_age, quota, fetch_sport
 from matcher import match_markets, match_wnba_ladders
 from notify import notify, install_log_scrubber
@@ -103,10 +104,10 @@ class Maker:
         n = 0
         for s in settlements:
             sid = s.get("ticker", "") + str(s.get("settled_time", ""))
+            _rev, _cost, _fee = norm_settlement(s)
             if store.record_settlement(
                     sid, s.get("ticker", "?"), s.get("market_result", ""),
-                    s.get("revenue", 0),
-                    s.get("yes_total_cost", 0) + s.get("no_total_cost", 0),
+                    _rev, _cost,
                     pnl=0, settled_at=str(s.get("settled_time", ""))):
                 n += 1
         self.settlements_primed = True
@@ -179,9 +180,8 @@ class Maker:
         for s in settlements:
             sid = s.get("ticker", "") + str(s.get("settled_time", ""))
             tkr = s.get("ticker", "?")
-            rev = s.get("revenue", 0)
-            cost = s.get("yes_total_cost", 0) + s.get("no_total_cost", 0)
-            pnl = rev - cost
+            rev, cost, fee = norm_settlement(s)
+            pnl = rev - cost - fee
             if not store.record_settlement(sid, tkr, s.get("market_result", ""),
                                            rev, cost, pnl,
                                            str(s.get("settled_time", ""))):
