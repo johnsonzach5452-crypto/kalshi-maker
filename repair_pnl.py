@@ -23,6 +23,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true",
                     help="write the corrected values to pnl_days")
+    ap.add_argument("--since", default="2026-07-19",
+                    help="only rewrite days on/after this (bot era). "
+                         "Earlier settlements are your manual history and "
+                         "must not be written into bot P&L.")
     args = ap.parse_args()
 
     store.init_db()
@@ -33,16 +37,32 @@ def main():
         print("could not fetch settlements:", e)
         return 1
 
+    # Attribute each settlement to BOT or MANUAL using the fill flags we
+    # recorded. Settlements are account-level, so without this the bot's
+    # P&L would absorb your hand-placed trades.
+    con0 = store.db()
+    taker_tickers = {r[0] for r in con0.execute(
+        "SELECT DISTINCT ticker FROM fills WHERE COALESCE(is_taker,0)=1")}
+    maker_tickers = {r[0] for r in con0.execute(
+        "SELECT DISTINCT ticker FROM fills WHERE COALESCE(is_taker,0)=0 "
+        "AND side IN ('yes','no')")}
+    con0.close()
+
     by_day = collections.defaultdict(int)
     rows = []
+    skipped_manual = 0
     for s in settlements:
         rev, cost, fee = norm_settlement(s)
         pnl = rev - cost - fee
         day = str(s.get("settled_time", ""))[:10]
-        if not day:
+        tkr = s.get("ticker", "?")
+        if not day or day < args.since:
+            continue
+        if tkr in taker_tickers and tkr not in maker_tickers:
+            skipped_manual += 1          # purely your own trade
             continue
         by_day[day] += pnl
-        rows.append((day, s.get("ticker", "?"), rev, cost, fee, pnl))
+        rows.append((day, tkr, rev, cost, fee, pnl))
 
     rows.sort(key=lambda r: r[0])
     print(f"{'DAY':12}{'TICKER':30}{'REV':>8}{'COST':>8}{'FEE':>6}{'P&L':>9}")
@@ -60,8 +80,8 @@ def main():
         total += by_day[day]
         flag = "  <-- was wrong" if old_v != by_day[day] else ""
         print(f"  {day}  old ${old_v/100:>9.2f}   true ${by_day[day]/100:>9.2f}{flag}")
-    print(f"\nTRUE realized total: ${total/100:+.2f}")
-    print(f"(settlements covered: {len(rows)})")
+    print(f"\nBOT realized total (since {args.since}): ${total/100:+.2f}")
+    print(f"(bot settlements: {len(rows)}; manual excluded: {skipped_manual})")
 
     if not args.apply:
         con.close()

@@ -226,18 +226,58 @@ class Maker:
                     q["event_key"] = t["event_key"]
                     q["ladder"] = t["ladder"]
                 want[(t["ticker"], q["side"])] = {**q, "ticker": t["ticker"]}
-        # enforce per-event cap across all rungs of the same game
+        # ── position-aware caps (v5.9) ──────────────────────────────
+        # CRITICAL: caps must count what we ALREADY HOLD, not just new
+        # quotes. Without this, each fill frees the cap to quote again:
+        # quote $15 -> fill -> cooldown -> quote $15 -> fill ... which
+        # turned a $15 rung cap into a 79-contract, $57 position.
+        held_by_rung: dict = {}
+        held_by_event: dict = {}
+        for tkr, inv in (inventory or {}).items():
+            cost = abs(inv.get("cost", 0))
+            if not cost:
+                continue
+            held_by_rung[tkr] = held_by_rung.get(tkr, 0) + cost
+            ek = tkr.rsplit("-", 1)[0]
+            held_by_event[ek] = held_by_event.get(ek, 0) + cost
+
         spend: dict = {}
         for key in list(want):
             q = want[key]
             ek = q.get("event_key")
             if not ek:
                 continue
-            cost = q["price"] * q["count"]
-            if spend.get(ek, 0) + cost > C.PER_EVENT_CAP:
+            tkr = q["ticker"]
+            price = max(q["price"], 1)
+
+            # 1. per-rung: existing position counts against the rung cap
+            rung_room = C.LADDER_RUNG_CAP - held_by_rung.get(tkr, 0)
+            if rung_room <= 0:
+                store.record_quote_event("skip", "", tkr, q["side"],
+                                         q["price"], q["count"],
+                                         reason="rung cap reached (holding)")
                 del want[key]
-            else:
-                spend[ek] = spend.get(ek, 0) + cost
+                continue
+
+            # 2. per-event: all rungs of this game share one budget
+            event_room = (C.PER_EVENT_CAP - held_by_event.get(ek, 0)
+                          - spend.get(ek, 0))
+            if event_room <= 0:
+                store.record_quote_event("skip", "", tkr, q["side"],
+                                         q["price"], q["count"],
+                                         reason="event cap reached (holding)")
+                del want[key]
+                continue
+
+            # 3. shrink the order to fit whatever room is left
+            max_cost = min(rung_room, event_room)
+            allowed = max_cost // price
+            if allowed < 1:
+                del want[key]
+                continue
+            if allowed < q["count"]:
+                q["count"] = int(allowed)
+            spend[ek] = spend.get(ek, 0) + price * q["count"]
         return want
 
     def _book(self, ticker, cache: dict):
