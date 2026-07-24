@@ -49,7 +49,8 @@ def init_db():
     # migrations on fills: fee/edge/sim columns
     cols = _columns(con, "fills")
     for name, ddl in [("fair_at_fill", "REAL"), ("edge_at_fill", "REAL"),
-                      ("fee_cents", "REAL"), ("is_sim", "INTEGER DEFAULT 0")]:
+                      ("fee_cents", "REAL"), ("is_sim", "INTEGER DEFAULT 0"),
+                      ("is_taker", "INTEGER DEFAULT 0")]:
         if name not in cols:
             con.execute(f"ALTER TABLE fills ADD COLUMN {name} {ddl}")
 
@@ -76,6 +77,8 @@ def init_db():
         count INTEGER, fair_at_fill REAL, fair_at_close REAL,
         edge_at_fill REAL, edge_vs_close REAL, computed_at TEXT,
         is_sim INTEGER DEFAULT 0)""")
+    if "is_taker" not in _columns(con, "maker_clv"):
+        con.execute("ALTER TABLE maker_clv ADD COLUMN is_taker INTEGER DEFAULT 0")
     con.execute("""CREATE TABLE IF NOT EXISTS pnl_days_sim (
         day TEXT PRIMARY KEY, realized INTEGER DEFAULT 0)""")
     con.execute("""CREATE TABLE IF NOT EXISTS meta (
@@ -135,15 +138,21 @@ def record_quote_event(event, order_id, ticker, side, price, count,
 
 
 def record_fill(fill_id, ticker, side, price, count, fair_at_fill=None,
-                edge_at_fill=None, fee_cents=None, is_sim=False) -> bool:
-    """Insert a fill if new. Returns True if it was new."""
+                edge_at_fill=None, fee_cents=None, is_sim=False,
+                is_taker=False) -> bool:
+    """Insert a fill if new. Returns True if it was new.
+
+    is_taker separates MANUAL trades (you clicking buy = taker, crossing
+    the spread) from BOT trades (resting orders = maker). Mixing them
+    corrupts every strategy metric, so they're tagged at the source.
+    """
     con = db()
     cur = con.execute(
         "INSERT OR IGNORE INTO fills(fill_id,ticker,side,price,count,"
-        "filled_at,fair_at_fill,edge_at_fill,fee_cents,is_sim) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "filled_at,fair_at_fill,edge_at_fill,fee_cents,is_sim,is_taker) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (fill_id, ticker, side, price, count, now_iso(),
-         fair_at_fill, edge_at_fill, fee_cents, int(is_sim)))
+         fair_at_fill, edge_at_fill, fee_cents, int(is_sim), int(is_taker)))
     new = cur.rowcount > 0
     con.commit()
     con.close()
@@ -219,39 +228,46 @@ def compute_clv_for_ticker(ticker: str, is_sim=False) -> list:
         return []
     con = db()
     fills = con.execute(
-        "SELECT fill_id, side, price, count, fair_at_fill FROM fills "
+        "SELECT fill_id, side, price, count, fair_at_fill, "
+        "COALESCE(is_taker,0) FROM fills "
         "WHERE ticker=? AND side IN ('yes','no') AND is_sim=? "
         "AND fill_id NOT IN (SELECT fill_id FROM maker_clv)",
         (ticker, int(is_sim))).fetchall()
     out = []
-    for fid, side, price, count, fair_at_fill in fills:
+    for fid, side, price, count, fair_at_fill, is_tkr in fills:
         fair_close_side = fair_close_yes * 100 if side == "yes" \
             else 100 - fair_close_yes * 100
         edge_vs_close = fair_close_side - price
         edge_at_fill = (fair_at_fill - price) if fair_at_fill is not None else None
-        con.execute("INSERT OR IGNORE INTO maker_clv VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        con.execute("INSERT OR IGNORE INTO maker_clv VALUES"
+                    "(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (fid, ticker, side, price, count, fair_at_fill,
                      fair_close_side, edge_at_fill, edge_vs_close,
-                     now_iso(), int(is_sim)))
+                     now_iso(), int(is_sim), int(is_tkr)))
         out.append({"fill_id": fid, "side": side, "price": price,
-                    "count": count, "edge_vs_close": edge_vs_close})
+                    "count": count, "edge_vs_close": edge_vs_close,
+                    "is_taker": bool(is_tkr)})
     con.commit()
     con.close()
     return out
 
 
 # ── daily summary / dashboard queries ──────────────────────────────────
-def daily_summary(day: str, is_sim=False) -> dict:
+def daily_summary(day: str, is_sim=False, maker_only=True) -> dict:
+    """maker_only=True excludes your manual (taker) trades so bot
+    performance isn't blended with hand-placed bets."""
     con = db()
     sim = int(is_sim)
+    tk = " AND COALESCE(is_taker,0)=0" if maker_only else ""
     f = con.execute(
         "SELECT COUNT(*), COALESCE(SUM(count),0), COALESCE(SUM(price*count),0), "
         "COALESCE(SUM(fee_cents),0), AVG(edge_at_fill) FROM fills "
-        "WHERE side IN ('yes','no') AND is_sim=? AND substr(filled_at,1,10)=?",
-        (sim, day)).fetchone()
+        "WHERE side IN ('yes','no') AND is_sim=?" + tk +
+        " AND substr(filled_at,1,10)=?", (sim, day)).fetchone()
     clv = con.execute(
         "SELECT AVG(edge_vs_close), SUM(edge_vs_close*count) FROM maker_clv "
-        "WHERE is_sim=? AND substr(computed_at,1,10)=?", (sim, day)).fetchone()
+        "WHERE is_sim=?" + tk + " AND substr(computed_at,1,10)=?",
+        (sim, day)).fetchone()
     con.close()
     return {
         "fills": f[0], "contracts": f[1], "volume_cents": f[2],
@@ -261,18 +277,39 @@ def daily_summary(day: str, is_sim=False) -> dict:
     }
 
 
-def fill_history(limit=25, is_sim=False) -> list:
+def fill_history(limit=25, is_sim=False, maker_only=True) -> list:
     con = db()
+    tk = " AND COALESCE(f.is_taker,0)=0" if maker_only else ""
     rows = con.execute(
         "SELECT f.filled_at, f.ticker, f.side, f.price, f.count, "
-        "f.fair_at_fill, f.edge_at_fill, c.edge_vs_close FROM fills f "
+        "f.fair_at_fill, f.edge_at_fill, c.edge_vs_close, "
+        "COALESCE(f.is_taker,0) FROM fills f "
         "LEFT JOIN maker_clv c ON c.fill_id=f.fill_id "
-        "WHERE f.side IN ('yes','no') AND f.is_sim=? "
-        "ORDER BY f.filled_at DESC LIMIT ?", (int(is_sim), limit)).fetchall()
+        "WHERE f.side IN ('yes','no') AND f.is_sim=?" + tk +
+        " ORDER BY f.filled_at DESC LIMIT ?", (int(is_sim), limit)).fetchall()
     con.close()
     return [{"at": (r[0] or "")[:16].replace("T", " "), "ticker": r[1],
              "side": r[2], "price": r[3], "count": r[4], "fair": r[5],
-             "edge": r[6], "clv": r[7]} for r in rows]
+             "edge": r[6], "clv": r[7], "manual": bool(r[8])} for r in rows]
+
+
+def strategy_stats(maker_only=True) -> dict:
+    """Headline numbers, maker-only by default. Size-weighted CLV is the
+    honest one: per-fill average hides the case where the big fills are
+    the bad ones."""
+    con = db()
+    tk = " AND COALESCE(is_taker,0)=0" if maker_only else ""
+    r = con.execute("SELECT AVG(edge_vs_close), COUNT(*), "
+                    "SUM(edge_vs_close*count), SUM(count) FROM maker_clv "
+                    "WHERE is_sim=0" + tk).fetchone()
+    f = con.execute("SELECT COUNT(*), SUM(count) FROM fills "
+                    "WHERE side IN ('yes','no') AND is_sim=0" + tk).fetchone()
+    con.close()
+    per_fill = r[0]
+    weighted = (r[2] / r[3]) if r[2] is not None and r[3] else None
+    return {"clv_per_fill": per_fill, "clv_size_weighted": weighted,
+            "scored_fills": r[1] or 0, "scored_contracts": r[3] or 0,
+            "total_fills": f[0] or 0, "total_contracts": f[1] or 0}
 
 
 def pnl_history(days=14, is_sim=False) -> list:

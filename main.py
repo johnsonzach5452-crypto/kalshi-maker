@@ -157,13 +157,20 @@ class Maker:
             edge = (fair - px) if fair is not None else None
             reported = fill_fee_cents(f)
             fee = reported if reported is not None else maker_fee_cents(px, cnt)
+            # is_taker distinguishes YOUR manual trades (crossing the
+            # spread) from the bot's resting-order fills. Never blend them.
+            taker = bool(f.get("is_taker"))
             if not store.record_fill(fid, tkr, side, px, cnt,
                                      fair_at_fill=fair, edge_at_fill=edge,
-                                     fee_cents=fee):
+                                     fee_cents=fee, is_taker=taker):
                 continue
             e_txt = f" | fair {fair:.1f}¢ | edge {edge:+.1f}¢" if fair is not None else ""
-            notify(f"🟢 FILL {tkr} — {cnt}x {side.upper()} @ {px}¢{e_txt}")
-            cooldowns[(tkr, side)] = time.time() + C.FILL_COOLDOWN_SECS
+            if taker:
+                notify(f"👤 MANUAL {tkr} — {cnt}x {side.upper()} @ {px}¢ "
+                       "(your trade, excluded from bot stats)")
+            else:
+                notify(f"🟢 FILL {tkr} — {cnt}x {side.upper()} @ {px}¢{e_txt}")
+                cooldowns[(tkr, side)] = time.time() + C.FILL_COOLDOWN_SECS
             oid = f.get("order_id")
             if oid in self.live:
                 self.live[oid]["count"] -= cnt
