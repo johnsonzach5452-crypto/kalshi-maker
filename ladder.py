@@ -1,75 +1,114 @@
-"""Strike-ladder pricing (item: WNBA spreads/totals, extensible).
+"""Strike-ladder pricing (WNBA spreads/totals, extensible).
 
-A ladder market like "Washington wins by over 6.5" is a point on the
-margin distribution's survival curve. We fit a Normal distribution to
-the sharp consensus — every devigged (line, probability) pair from every
-book is one constraint — then read fair value for ANY strike off the
-fitted curve. The modeling gap (retail trades these, few price them) is
-the edge.
+A ladder market like "Washington wins by over 6.5" is a point on the margin
+distribution's survival curve. We fit a location-scale distribution to the
+sharp consensus — every devigged (line, probability) pair from every book is
+one constraint — then read fair value for ANY strike off the fitted curve.
+The modeling gap (retail trades these, few price them) is the edge.
 
-Math: P(X > x) = p  <=>  Phi^-1(p) * sigma = mu - x, which is linear in
-(mu, sigma) — closed-form least squares, no scipy needed.
+Math: P(X > x) = p  <=>  Q(p) * scale = mu - x, which is linear in
+(mu, scale) — closed-form least squares, no scipy needed. Q is the quantile
+function of the chosen tail (Normal or Student-t).
+
+WHY A PLUGGABLE TAIL (v6.0)
+The original pricer fit a Normal, whose tails decay as exp(-x^2/2). Basketball
+margins and totals have HEAVIER tails than that, so the Normal systematically
+underprices tail strikes — big overs and big covers. Measured live, the bot
+sold those too cheap: 42% win rate vs a ~70% break-even, p~0.4% the fairs were
+correctly priced. Switching the tail to Student-t (fat, df=LADDER_T_DF) fattens
+exactly those tails while still matching the interior sharp lines. Normal is the
+df->inf special case, so nothing about the fit structure changes.
+
+Default is still "normal" so deploying this file does NOT silently change live
+behavior. Set LADDER_DIST=t (and LADDER_T_DF, ~5-7) to A/B the fix in paper
+mode — that is the intended validation path.
 """
 import logging
 import math
+import os
+
+import dist
 
 log = logging.getLogger("ladder")
 
-# Reasonable priors when only one constraint exists (moneyline only)
-SIGMA_PRIOR = {"wnba_margin": 11.5, "wnba_total": 13.5,
-               "nba_margin": 12.0, "nba_total": 18.0}
+# ── distribution selection (env-overridable, matches config's _s/_f style) ─
+LADDER_DIST = os.environ.get("LADDER_DIST", "normal")   # "normal" | "t"
+LADDER_T_DF = float(os.environ.get("LADDER_T_DF", "6"))  # Student-t df (fat tails)
+
+# Reasonable priors (as point STD-DEVs) when only one constraint exists.
+# Fattened from the original thin-tail values per the tail-underpricing fix:
+# wnba_total 13.5 -> 16.0, wnba_margin 11.5 -> 13.0. These only bind on
+# moneyline-only fits; multi-line fits are data-driven.
+SIGMA_PRIOR = {"wnba_margin": float(os.environ.get("SIGMA_WNBA_MARGIN", "13.0")),
+               "wnba_total":  float(os.environ.get("SIGMA_WNBA_TOTAL", "16.0")),
+               "nba_margin":  float(os.environ.get("SIGMA_NBA_MARGIN", "12.5")),
+               "nba_total":   float(os.environ.get("SIGMA_NBA_TOTAL", "19.0"))}
 
 
+def _q(p: float) -> float:
+    """Quantile of the chosen standard tail."""
+    return dist.ppf(p, LADDER_DIST, LADDER_T_DF)
+
+
+def _sf(z: float) -> float:
+    """Survival P(Z > z) of the chosen standard tail."""
+    return 1.0 - dist.cdf(z, LADDER_DIST, LADDER_T_DF)
+
+
+def _cdf(z: float) -> float:
+    return dist.cdf(z, LADDER_DIST, LADDER_T_DF)
+
+
+# Backward-compatible aliases (old code / tests may import these) ───────────
 def norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+    return dist.norm_cdf(x)
 
 
 def norm_ppf(p: float) -> float:
-    """Inverse normal CDF via bisection on erf (|z| <= 8)."""
-    p = min(max(p, 1e-9), 1 - 1e-9)
-    lo, hi = -8.0, 8.0
-    for _ in range(80):
-        mid = (lo + hi) / 2
-        if norm_cdf(mid) < p:
-            lo = mid
-        else:
-            hi = mid
-    return (lo + hi) / 2
+    return dist.norm_ppf(p)
 
 
 def fit_normal(points, sigma_prior: float):
-    """points: [(x, p)] meaning P(X > x) = p. Returns (mu, sigma).
+    """points: [(x, p)] meaning P(X > x) = p. Returns (mu, scale).
 
-    Linearized: x_i = mu - sigma * z_i where z_i = Phi^-1(p_i).
-    With <2 distinct x we pin sigma to the prior. Sigma is clamped to a
-    sane band around the prior so a bad quote can't produce an insane
-    distribution.
+    Linearized: x_i = mu - scale * q_i where q_i = Q(p_i) is the quantile
+    of the chosen tail. With <2 distinct x we pin scale to the prior. Scale
+    is clamped to a sane band around the prior so a bad quote can't produce
+    an insane distribution.
+
+    Name kept as fit_normal for drop-in compatibility; it now fits whichever
+    tail LADDER_DIST selects. The prior is a point std-dev; for Student-t it
+    is converted to the equivalent scale so central spread is preserved and
+    only the tail shape changes.
     """
+    # convert desired point-std prior into this tail's scale parameter
+    scale_prior = sigma_prior / dist.tail_std(LADDER_DIST, LADDER_T_DF)
+
     pts = [(x, p) for x, p in points if 0.001 < p < 0.999]
     if not pts:
         return None, None
-    zs = [norm_ppf(p) for _, p in pts]
+    zs = [_q(p) for _, p in pts]
     xs = [x for x, _ in pts]
     if len(set(xs)) < 2:
-        sigma = sigma_prior
-        mu = sum(x + sigma * z for x, z in zip(xs, zs)) / len(xs)
-        return mu, sigma
+        scale = scale_prior
+        mu = sum(x + scale * z for x, z in zip(xs, zs)) / len(xs)
+        return mu, scale
     n = len(xs)
     zbar = sum(zs) / n
     xbar = sum(xs) / n
     denom = sum((z - zbar) ** 2 for z in zs)
     if denom < 1e-9:
-        sigma = sigma_prior
+        scale = scale_prior
     else:
-        sigma = -sum((z - zbar) * (x - xbar) for z, x in zip(zs, xs)) / denom
-    sigma = min(max(sigma, sigma_prior * 0.5), sigma_prior * 2.0)
-    mu = xbar + sigma * zbar
-    return mu, sigma
+        scale = -sum((z - zbar) * (x - xbar) for z, x in zip(zs, xs)) / denom
+    scale = min(max(scale, scale_prior * 0.5), scale_prior * 2.0)
+    mu = xbar + scale * zbar
+    return mu, scale
 
 
-def prob_greater(mu: float, sigma: float, x: float) -> float:
-    """P(X > x) under the fitted Normal."""
-    return 1.0 - norm_cdf((x - mu) / sigma)
+def prob_greater(mu: float, scale: float, x: float) -> float:
+    """P(X > x) under the fitted distribution."""
+    return _sf((x - mu) / scale)
 
 
 class GameDists:
@@ -88,7 +127,7 @@ class GameDists:
         if team_is_home:
             return prob_greater(self.mu_m, self.sigma_m, threshold)
         # away margin = -(home margin): P(-M > t) = P(M < -t)
-        return norm_cdf((-threshold - self.mu_m) / self.sigma_m)
+        return _cdf((-threshold - self.mu_m) / self.sigma_m)
 
     def total_fair(self, threshold: float):
         """Fair P(total points > threshold)."""

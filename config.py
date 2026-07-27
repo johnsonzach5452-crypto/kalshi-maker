@@ -217,3 +217,24 @@ LOGIT_SKEW        = _i("LOGIT_SKEW", 0)        # 1 = use logit skew
 LOGIT_GAMMA       = _f("LOGIT_GAMMA", 0.35)    # risk aversion
 LOGIT_SIGMA       = _f("LOGIT_SIGMA", 1.10)    # belief vol (logit units)
 LOGIT_HORIZON_MIN = _f("LOGIT_HORIZON_MIN", 2880.0)  # tau=1 at 48h out
+
+# ── v6.0 fat-tailed ladder pricer (the model-bias fix) ─────────────────
+# The Normal pricer has tails that decay as exp(-x^2/2) — too thin for
+# basketball margins/totals, so it UNDERPRICES big overs and big covers.
+# Measured live: 42% win rate vs ~70% break-even, p~0.4% the fairs were
+# correctly priced. Switching the fitted tail to Student-t fattens exactly
+# those tails while still matching interior sharp lines. Normal is the
+# df->inf special case, so the closed-form fit is unchanged.
+#
+# These are read directly by ladder.py (kept local there, like SIGMA_PRIOR
+# always was). Documented here so the tunable surface stays discoverable.
+#   LADDER_DIST   "normal" (default, = current live behavior) | "t"
+#   LADDER_T_DF   Student-t degrees of freedom (fat tails). ~5-7 realistic;
+#                 TUNE against calibrate.py until TOTAL/SPREAD bias -> 0.
+#   SIGMA_WNBA_TOTAL / SIGMA_WNBA_MARGIN  point std-dev priors (only bind on
+#                 moneyline-only fits). Fattened 13.5->16.0 / 11.5->13.0.
+# Validation path: leave normal live, flip LADDER_DIST=t in PAPER mode
+# (KILL=1), let it log fairs+settlements, then `python3 calibrate.py --sim`
+# to confirm the tail bias is gone before going live. Nothing here changes
+# production until you set LADDER_DIST=t.
+LADDER_DIST_DOC = "see ladder.py: LADDER_DIST / LADDER_T_DF"
